@@ -477,9 +477,10 @@ def report_page():
                             image_data = get_image_from_drive(service, graphic["drive_file_id"])
                         
                         if image_data:
-                            # Konwertuj bytes na obraz PIL i wyświetl jako większą miniaturkę
+                            # Konwertuj bytes na obraz PIL
                             image = Image.open(io.BytesIO(image_data))
-                            st.image(image, width=120)  # Większa miniaturka, natywne powiększanie
+                            # Wyświetl bez ograniczenia width - Streamlit sam ustawi rozmiar
+                            st.image(image, use_container_width=True)
                         else:
                             st.write("❌ Brak danych")
                             st.caption("Nie udało się pobrać")
