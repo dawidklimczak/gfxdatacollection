@@ -1,151 +1,352 @@
 import streamlit as st
+import json
+import os
+import hashlib
+import shutil
+from datetime import datetime
+from PIL import Image
 import pandas as pd
-import math
-from pathlib import Path
+from colorthief import ColorThief
+import io
+import tempfile
+from math import gcd
 
-# Set the title and favicon that appear in the Browser's tab bar.
+# Konfiguracja aplikacji
 st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+    page_title="Katalog Grafik",
+    page_icon="🎨",
+    layout="wide"
 )
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Tworzenie struktury folderów
+def create_directories():
+    """Tworzy niezbędne foldery jeśli nie istnieją"""
+    os.makedirs("data", exist_ok=True)
+    os.makedirs("data/uploads", exist_ok=True)
+    os.makedirs("backups", exist_ok=True)
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# Funkcje pomocnicze dla JSON
+def load_data():
+    """Ładuje dane z pliku JSON"""
+    try:
+        with open("data/graphics_data.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"graphics": []}
+    except json.JSONDecodeError:
+        st.error("Błąd odczytu pliku danych. Sprawdź backup.")
+        return {"graphics": []}
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+def save_data(data):
+    """Zapisuje dane do pliku JSON z backupem"""
+    # Tworzenie backupu przed zapisem
+    if os.path.exists("data/graphics_data.json"):
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        backup_path = f"backups/graphics_data_{timestamp}.json"
+        shutil.copy2("data/graphics_data.json", backup_path)
+    
+    # Atomowy zapis przez plik tymczasowy
+    temp_path = "data/graphics_data_temp.json"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        
+        # Przeniesienie pliku tymczasowego na docelowy
+        shutil.move(temp_path, "data/graphics_data.json")
+        return True
+    except Exception as e:
+        st.error(f"Błąd zapisu danych: {e}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return False
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+def calculate_ratio(width, height):
+    """Oblicza proporcje obrazu"""
+    ratio_gcd = gcd(width, height)
+    ratio_w = width // ratio_gcd
+    ratio_h = height // ratio_gcd
+    
+    # Popularne proporcje
+    common_ratios = {
+        (1, 1): "1:1",
+        (4, 3): "4:3", 
+        (3, 4): "3:4",
+        (16, 9): "16:9",
+        (9, 16): "9:16",
+        (3, 2): "3:2",
+        (2, 3): "2:3",
+        (5, 4): "5:4",
+        (4, 5): "4:5"
+    }
+    
+    return common_ratios.get((ratio_w, ratio_h), f"{ratio_w}:{ratio_h}")
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+def extract_color_palette(image_bytes, num_colors=6):
+    """Wyciąga paletę kolorów z obrazu"""
+    try:
+        # Zapisz obraz do pliku tymczasowego
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
+            tmp_file.write(image_bytes)
+            tmp_file_path = tmp_file.name
+        
+        # Wyciągnij paletę kolorów
+        color_thief = ColorThief(tmp_file_path)
+        palette = color_thief.get_palette(color_count=num_colors)
+        
+        # Usuń plik tymczasowy
+        os.unlink(tmp_file_path)
+        
+        # Konwertuj na hex
+        hex_colors = [f"#{r:02x}{g:02x}{b:02x}" for r, g, b in palette]
+        return hex_colors
+    except Exception as e:
+        st.warning(f"Nie udało się wyciągnąć palety kolorów: {e}")
+        return []
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+def process_uploaded_image(uploaded_file):
+    """Przetwarza przesłany obraz i wyciąga metadane"""
+    # Generuj unikalny hash
+    file_bytes = uploaded_file.getvalue()
+    file_hash = hashlib.md5(file_bytes).hexdigest()
+    
+    # Otwórz obraz
+    image = Image.open(io.BytesIO(file_bytes))
+    
+    # Zapisz obraz na dysku
+    file_extension = uploaded_file.name.split('.')[-1].lower()
+    filename = f"{file_hash}.{file_extension}"
+    filepath = f"data/uploads/{filename}"
+    
+    with open(filepath, "wb") as f:
+        f.write(file_bytes)
+    
+    # Wyciągnij metadane
+    width, height = image.size
+    ratio = calculate_ratio(width, height)
+    color_palette = extract_color_palette(file_bytes)
+    
+    return {
+        "id": file_hash,
+        "filename": uploaded_file.name,
+        "stored_filename": filename,
+        "upload_date": datetime.now().isoformat(),
+        "technical": {
+            "format": image.format or file_extension.upper(),
+            "dimensions": [width, height],
+            "ratio": ratio,
+            "file_size": len(file_bytes),
+            "color_palette": color_palette
+        }
+    }
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+# Strona 1: Uploader
+def uploader_page():
+    st.title("Dodaj Nową Grafikę")
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.subheader("Plik graficzny")
+        uploaded_file = st.file_uploader(
+            "Wybierz plik graficzny",
+            type=['png', 'jpg', 'jpeg', 'webp', 'gif'],
+            help="Obsługiwane formaty: PNG, JPG, JPEG, WEBP, GIF"
         )
+        
+        if uploaded_file:
+            st.image(uploaded_file, caption="Podgląd", use_column_width=True)
+    
+    with col2:
+        st.subheader("Dane biznesowe")
+        
+        rynek = st.selectbox(
+            "Rynek",
+            options=["medica", "edukacja", "biznes"],
+            index=0
+        )
+        
+        typ_odbiorcy = st.text_input("Typ odbiorcy")
+        typ_kampanii = st.text_input("Typ kampanii")
+        
+        col2_1, col2_2 = st.columns(2)
+        with col2_1:
+            ctr = st.number_input("CTR (%)", min_value=0.0, step=0.01, format="%.2f")
+        with col2_2:
+            roas = st.number_input("ROAS", min_value=0.0, step=0.01, format="%.2f")
+    
+    if st.button("Dodaj grafikę", type="primary"):
+        if uploaded_file and typ_odbiorcy and typ_kampanii:
+            try:
+                # Przetwórz obraz
+                image_data = process_uploaded_image(uploaded_file)
+                
+                # Dodaj dane biznesowe
+                image_data["business"] = {
+                    "rynek": rynek,
+                    "typ_odbiorcy": typ_odbiorcy,
+                    "typ_kampanii": typ_kampanii,
+                    "ctr": ctr,
+                    "roas": roas
+                }
+                
+                # Wczytaj istniejące dane
+                data = load_data()
+                
+                # Sprawdź duplikaty
+                existing_ids = [item["id"] for item in data["graphics"]]
+                if image_data["id"] in existing_ids:
+                    st.warning("Ta grafika już istnieje w bazie!")
+                    return
+                
+                # Dodaj nową grafikę
+                data["graphics"].append(image_data)
+                
+                # Zapisz dane
+                if save_data(data):
+                    st.success("Grafika została dodana!")
+                    st.balloons()
+                else:
+                    st.error("Wystąpił błąd podczas zapisu.")
+                    
+            except Exception as e:
+                st.error(f"Błąd podczas przetwarzania: {e}")
+        else:
+            st.error("Wypełnij wszystkie wymagane pola!")
+
+# Strona 2: Raport
+def report_page():
+    st.title("Raport Grafik")
+    
+    # Wczytaj dane
+    data = load_data()
+    graphics = data["graphics"]
+    
+    if not graphics:
+        st.info("Brak grafik w bazie. Dodaj pierwszą grafikę w zakładce 'Uploader'.")
+        return
+    
+    # Filtry
+    st.subheader("Filtry")
+    col1, col2, col3 = st.columns(3)
+    
+    # Pobierz unikalne wartości do filtrów
+    rynki = list(set([g["business"]["rynek"] for g in graphics]))
+    typy_odbiorcy = list(set([g["business"]["typ_odbiorcy"] for g in graphics]))
+    typy_kampanii = list(set([g["business"]["typ_kampanii"] for g in graphics]))
+    
+    with col1:
+        selected_rynek = st.multiselect("Rynek", options=rynki, default=rynki)
+    with col2:
+        selected_typ_odbiorcy = st.multiselect("Typ odbiorcy", options=typy_odbiorcy, default=typy_odbiorcy)
+    with col3:
+        selected_typ_kampanii = st.multiselect("Typ kampanii", options=typy_kampanii, default=typy_kampanii)
+    
+    # Sortowanie
+    sort_col1, sort_col2 = st.columns(2)
+    with sort_col1:
+        sort_by = st.selectbox("Sortuj według", ["upload_date", "ctr", "roas", "filename"])
+    with sort_col2:
+        sort_order = st.selectbox("Kolejność", ["Malejąco", "Rosnąco"])
+    
+    # Filtruj dane
+    filtered_graphics = [
+        g for g in graphics 
+        if (g["business"]["rynek"] in selected_rynek and
+            g["business"]["typ_odbiorcy"] in selected_typ_odbiorcy and
+            g["business"]["typ_kampanii"] in selected_typ_kampanii)
+    ]
+    
+    # Sortuj dane
+    reverse = sort_order == "Malejąco"
+    if sort_by in ["ctr", "roas"]:
+        filtered_graphics.sort(key=lambda x: x["business"][sort_by], reverse=reverse)
+    elif sort_by == "upload_date":
+        filtered_graphics.sort(key=lambda x: x["upload_date"], reverse=reverse)
+    else:
+        filtered_graphics.sort(key=lambda x: x["filename"], reverse=reverse)
+    
+    # Pokaż statystyki
+    st.subheader(f"Znaleziono: {len(filtered_graphics)} grafik")
+    
+    if filtered_graphics:
+        # Statystyki podsumowujące
+        avg_ctr = sum([g["business"]["ctr"] for g in filtered_graphics]) / len(filtered_graphics)
+        avg_roas = sum([g["business"]["roas"] for g in filtered_graphics]) / len(filtered_graphics)
+        
+        metric_col1, metric_col2 = st.columns(2)
+        with metric_col1:
+            st.metric("Średni CTR", f"{avg_ctr:.2f}%")
+        with metric_col2:
+            st.metric("Średni ROAS", f"{avg_roas:.2f}")
+        
+        # Tabela z grafikami
+        st.subheader("Grafiki")
+        
+        for idx, graphic in enumerate(filtered_graphics):
+            with st.expander(f"{graphic['filename']} | CTR: {graphic['business']['ctr']:.2f}% | ROAS: {graphic['business']['roas']:.2f}"):
+                col1, col2 = st.columns([1, 2])
+                
+                with col1:
+                    # Pokaż miniaturkę
+                    image_path = f"data/uploads/{graphic['stored_filename']}"
+                    if os.path.exists(image_path):
+                        st.image(image_path, caption="Kliknij by powiększyć", use_column_width=True)
+                        
+                        # Modal do powiększenia
+                        if st.button(f"Powiększ {idx}", key=f"enlarge_{graphic['id']}"):
+                            st.image(image_path, caption=graphic['filename'])
+                    else:
+                        st.error("Plik graficzny nie został znaleziony")
+                
+                with col2:
+                    # Dane biznesowe
+                    st.write("**Dane biznesowe:**")
+                    st.write(f"- Rynek: {graphic['business']['rynek']}")
+                    st.write(f"- Typ odbiorcy: {graphic['business']['typ_odbiorcy']}")
+                    st.write(f"- Typ kampanii: {graphic['business']['typ_kampanii']}")
+                    st.write(f"- CTR: {graphic['business']['ctr']:.2f}%")
+                    st.write(f"- ROAS: {graphic['business']['roas']:.2f}")
+                    
+                    # Dane techniczne
+                    st.write("**Dane techniczne:**")
+                    tech = graphic['technical']
+                    st.write(f"- Format: {tech['format']}")
+                    st.write(f"- Wymiary: {tech['dimensions'][0]}x{tech['dimensions'][1]}px")
+                    st.write(f"- Proporcje: {tech['ratio']}")
+                    st.write(f"- Rozmiar: {tech['file_size'] / 1024:.1f} KB")
+                    st.write(f"- Data dodania: {graphic['upload_date'][:10]}")
+                    
+                    # Paleta kolorów
+                    if tech['color_palette']:
+                        st.write("**Paleta kolorów:**")
+                        colors_html = "".join([
+                            f'<span style="display:inline-block;width:30px;height:30px;background-color:{color};margin:2px;border:1px solid #ccc;"></span>' 
+                            for color in tech['color_palette']
+                        ])
+                        st.markdown(colors_html, unsafe_allow_html=True)
+
+# Główna aplikacja
+def main():
+    create_directories()
+    
+    # Sidebar z nawigacją
+    st.sidebar.title("Katalog Grafik")
+    page = st.sidebar.selectbox("Wybierz stronę", ["Uploader", "Raport"])
+    
+    # Informacje o backupach
+    backup_files = [f for f in os.listdir("backups") if f.startswith("graphics_data_")]
+    if backup_files:
+        st.sidebar.write(f"Dostępne backupy: {len(backup_files)}")
+        if st.sidebar.button("Pokaż backupy"):
+            st.sidebar.write("Ostatnie backupy:")
+            for backup in sorted(backup_files)[-5:]:
+                st.sidebar.text(backup)
+    
+    # Wybór strony
+    if page == "Uploader":
+        uploader_page()
+    elif page == "Raport":
+        report_page()
+
+if __name__ == "__main__":
+    main()
