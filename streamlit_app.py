@@ -493,7 +493,7 @@ def report_page():
 def main():
     # Sidebar z nawigacją
     st.sidebar.title("Katalog Grafik")
-    page = st.sidebar.selectbox("Wybierz stronę", ["Uploader", "Raport"])
+    page = st.sidebar.radio("Wybierz stronę", ["Uploader", "Raport"])
     
     # Status połączenia
     service = connect_to_drive()
