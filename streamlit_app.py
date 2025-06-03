@@ -154,7 +154,7 @@ def uploader_page():
         )
         
         if uploaded_file:
-            st.image(uploaded_file, caption="Podgląd", use_column_width=True)
+            st.image(uploaded_file, caption="Podgląd", use_container_width=True)
     
     with col2:
         st.subheader("Dane biznesowe")
@@ -282,48 +282,67 @@ def report_page():
         # Tabela z grafikami
         st.subheader("Grafiki")
         
+        # Nagłówki tabeli
+        header_cols = st.columns([1, 2, 2, 1, 1, 1.5, 1, 2])
+        header_cols[0].write("**Grafika**")
+        header_cols[1].write("**Typ odbiorcy**")
+        header_cols[2].write("**Typ kampanii**")
+        header_cols[3].write("**CTR**")
+        header_cols[4].write("**ROAS**")
+        header_cols[5].write("**Wymiary**")
+        header_cols[6].write("**Proporcje**")
+        header_cols[7].write("**Paleta kolorów**")
+        
+        st.divider()
+        
+        # Wiersze tabeli
         for idx, graphic in enumerate(filtered_graphics):
-            with st.expander(f"{graphic['filename']} | CTR: {graphic['business']['ctr']:.2f}% | ROAS: {graphic['business']['roas']:.2f}"):
-                col1, col2 = st.columns([1, 2])
-                
-                with col1:
-                    # Pokaż miniaturkę
-                    image_path = f"data/uploads/{graphic['stored_filename']}"
-                    if os.path.exists(image_path):
-                        st.image(image_path, caption="Kliknij by powiększyć", use_column_width=True)
-                        
-                        # Modal do powiększenia
-                        if st.button(f"Powiększ {idx}", key=f"enlarge_{graphic['id']}"):
-                            st.image(image_path, caption=graphic['filename'])
-                    else:
-                        st.error("Plik graficzny nie został znaleziony")
-                
-                with col2:
-                    # Dane biznesowe
-                    st.write("**Dane biznesowe:**")
-                    st.write(f"- Rynek: {graphic['business']['rynek']}")
-                    st.write(f"- Typ odbiorcy: {graphic['business']['typ_odbiorcy']}")
-                    st.write(f"- Typ kampanii: {graphic['business']['typ_kampanii']}")
-                    st.write(f"- CTR: {graphic['business']['ctr']:.2f}%")
-                    st.write(f"- ROAS: {graphic['business']['roas']:.2f}")
-                    
-                    # Dane techniczne
-                    st.write("**Dane techniczne:**")
-                    tech = graphic['technical']
-                    st.write(f"- Format: {tech['format']}")
-                    st.write(f"- Wymiary: {tech['dimensions'][0]}x{tech['dimensions'][1]}px")
-                    st.write(f"- Proporcje: {tech['ratio']}")
-                    st.write(f"- Rozmiar: {tech['file_size'] / 1024:.1f} KB")
-                    st.write(f"- Data dodania: {graphic['upload_date'][:10]}")
-                    
-                    # Paleta kolorów
-                    if tech['color_palette']:
-                        st.write("**Paleta kolorów:**")
-                        colors_html = "".join([
-                            f'<span style="display:inline-block;width:30px;height:30px;background-color:{color};margin:2px;border:1px solid #ccc;"></span>' 
-                            for color in tech['color_palette']
-                        ])
-                        st.markdown(colors_html, unsafe_allow_html=True)
+            cols = st.columns([1, 2, 2, 1, 1, 1.5, 1, 2])
+            
+            with cols[0]:
+                # Miniaturka
+                image_path = f"data/uploads/{graphic['stored_filename']}"
+                if os.path.exists(image_path):
+                    st.image(image_path, width=60)
+                    # Przycisk do powiększenia
+                    if st.button("🔍", key=f"enlarge_{graphic['id']}", help="Powiększ grafikę"):
+                        st.image(image_path, caption=graphic['filename'])
+                else:
+                    st.write("❌")
+            
+            with cols[1]:
+                st.write(graphic['business']['typ_odbiorcy'])
+            
+            with cols[2]:
+                st.write(graphic['business']['typ_kampanii'])
+            
+            with cols[3]:
+                st.write(f"{graphic['business']['ctr']:.2f}%")
+            
+            with cols[4]:
+                st.write(f"{graphic['business']['roas']:.2f}")
+            
+            with cols[5]:
+                tech = graphic['technical']
+                st.write(f"{tech['dimensions'][0]}×{tech['dimensions'][1]}")
+            
+            with cols[6]:
+                st.write(tech['ratio'])
+            
+            with cols[7]:
+                # Paleta kolorów jako małe kwadraciki
+                if tech['color_palette']:
+                    colors_html = "".join([
+                        f'<span style="display:inline-block;width:20px;height:20px;background-color:{color};margin:1px;border:1px solid #ddd;border-radius:2px;" title="{color}"></span>' 
+                        for color in tech['color_palette'][:6]  # Max 6 kolorów
+                    ])
+                    st.markdown(colors_html, unsafe_allow_html=True)
+                else:
+                    st.write("-")
+            
+            # Separator między wierszami
+            if idx < len(filtered_graphics) - 1:
+                st.write("")
 
 # Główna aplikacja
 def main():
