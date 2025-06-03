@@ -1,15 +1,20 @@
 import streamlit as st
 import json
-import os
 import hashlib
-import shutil
+import io
+import tempfile
 from datetime import datetime
 from PIL import Image
 import pandas as pd
 from colorthief import ColorThief
-import io
-import tempfile
 from math import gcd
+import base64
+
+# Google Drive API
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+import requests
 
 # Konfiguracja aplikacji
 st.set_page_config(
@@ -18,68 +23,160 @@ st.set_page_config(
     layout="wide"
 )
 
-# Tworzenie struktury folderów
-def create_directories():
-    """Tworzy niezbędne foldery jeśli nie istnieją"""
-    os.makedirs("data", exist_ok=True)
-    os.makedirs("data/uploads", exist_ok=True)
-    os.makedirs("backups", exist_ok=True)
-
-# Funkcje pomocnicze dla JSON
-def load_data():
-    """Ładuje dane z pliku JSON"""
+# Połączenie z Google Drive
+@st.cache_resource
+def connect_to_drive():
+    """Łączy się z Google Drive API"""
     try:
-        with open("data/graphics_data.json", "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"graphics": []}
-    except json.JSONDecodeError:
-        st.error("Błąd odczytu pliku danych. Sprawdź backup.")
-        return {"graphics": []}
+        credentials = service_account.Credentials.from_service_account_info(
+            st.secrets["google_service_account"],
+            scopes=['https://www.googleapis.com/auth/drive']
+        )
+        service = build('drive', 'v3', credentials=credentials)
+        return service
+    except Exception as e:
+        st.error(f"Błąd połączenia z Google Drive: {e}")
+        return None
 
-def save_data(data):
-    """Zapisuje dane do pliku JSON z backupem"""
-    # Tworzenie backupu przed zapisem
-    if os.path.exists("data/graphics_data.json"):
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        backup_path = f"backups/graphics_data_{timestamp}.json"
-        shutil.copy2("data/graphics_data.json", backup_path)
+def get_folder_id():
+    """Pobiera ID głównego folderu z secrets"""
+    return st.secrets.get("drive_folder_id", "")
+
+def find_or_create_folder(service, parent_folder_id, folder_name):
+    """Znajduje lub tworzy folder o podanej nazwie"""
+    # Szukaj istniejącego folderu
+    query = f"name='{folder_name}' and '{parent_folder_id}' in parents and mimeType='application/vnd.google-apps.folder'"
+    results = service.files().list(q=query).execute()
+    items = results.get('files', [])
     
-    # Atomowy zapis przez plik tymczasowy
-    temp_path = "data/graphics_data_temp.json"
+    if items:
+        return items[0]['id']
+    
+    # Utwórz nowy folder
+    folder_metadata = {
+        'name': folder_name,
+        'parents': [parent_folder_id],
+        'mimeType': 'application/vnd.google-apps.folder'
+    }
+    folder = service.files().create(body=folder_metadata).execute()
+    return folder['id']
+
+def upload_file_to_drive(service, file_content, filename, parent_folder_id, mime_type='image/jpeg'):
+    """Upload pliku na Google Drive"""
     try:
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        media = MediaIoBaseUpload(io.BytesIO(file_content), mimetype=mime_type)
+        file_metadata = {
+            'name': filename,
+            'parents': [parent_folder_id]
+        }
+        file = service.files().create(body=file_metadata, media_body=media).execute()
+        return file['id']
+    except Exception as e:
+        st.error(f"Błąd uploadu pliku {filename}: {e}")
+        return None
+
+def download_file_from_drive(service, file_id):
+    """Pobiera plik z Google Drive"""
+    try:
+        request = service.files().get_media(fileId=file_id)
+        file_io = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_io, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        file_io.seek(0)
+        return file_io.getvalue()
+    except Exception as e:
+        st.error(f"Błąd pobierania pliku: {e}")
+        return None
+
+def find_file_in_folder(service, folder_id, filename):
+    """Znajduje plik w folderze"""
+    query = f"name='{filename}' and '{folder_id}' in parents"
+    results = service.files().list(q=query).execute()
+    items = results.get('files', [])
+    return items[0]['id'] if items else None
+
+def save_json_to_drive(service, data, folder_id, filename="graphics_data.json"):
+    """Zapisuje JSON na Google Drive"""
+    try:
+        # Backup przed zapisem
+        existing_file_id = find_file_in_folder(service, folder_id, filename)
+        if existing_file_id:
+            # Utwórz backup z timestampem
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            backup_filename = f"graphics_data_backup_{timestamp}.json"
+            
+            # Pobierz istniejący plik
+            existing_content = download_file_from_drive(service, existing_file_id)
+            if existing_content:
+                # Znajdź lub utwórz folder backups
+                backups_folder_id = find_or_create_folder(service, folder_id, "backups")
+                # Zapisz backup
+                upload_file_to_drive(service, existing_content, backup_filename, backups_folder_id, 'application/json')
         
-        # Przeniesienie pliku tymczasowego na docelowy
-        shutil.move(temp_path, "data/graphics_data.json")
+        # Zapisz nowy plik
+        json_content = json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')
+        media = MediaIoBaseUpload(io.BytesIO(json_content), mimetype='application/json')
+        
+        if existing_file_id:
+            # Aktualizuj istniejący plik
+            service.files().update(fileId=existing_file_id, media_body=media).execute()
+        else:
+            # Utwórz nowy plik
+            file_metadata = {
+                'name': filename,
+                'parents': [folder_id]
+            }
+            service.files().create(body=file_metadata, media_body=media).execute()
+        
         return True
     except Exception as e:
-        st.error(f"Błąd zapisu danych: {e}")
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        st.error(f"Błąd zapisu JSON: {e}")
         return False
 
+def load_json_from_drive(service, folder_id, filename="graphics_data.json"):
+    """Ładuje JSON z Google Drive"""
+    try:
+        file_id = find_file_in_folder(service, folder_id, filename)
+        if not file_id:
+            return {"graphics": []}
+        
+        content = download_file_from_drive(service, file_id)
+        if content:
+            return json.loads(content.decode('utf-8'))
+        return {"graphics": []}
+    except Exception as e:
+        st.error(f"Błąd odczytu JSON: {e}")
+        return {"graphics": []}
+
 def calculate_ratio(width, height):
-    """Oblicza proporcje obrazu"""
-    ratio_gcd = gcd(width, height)
-    ratio_w = width // ratio_gcd
-    ratio_h = height // ratio_gcd
+    """Oblicza najbliższą standardową proporcję obrazu"""
+    actual_ratio = width / height
     
-    # Popularne proporcje
-    common_ratios = {
-        (1, 1): "1:1",
-        (4, 3): "4:3", 
-        (3, 4): "3:4",
-        (16, 9): "16:9",
-        (9, 16): "9:16",
-        (3, 2): "3:2",
-        (2, 3): "2:3",
-        (5, 4): "5:4",
-        (4, 5): "4:5"
+    # Standardowe proporcje (nazwa: wartość dziesiętna)
+    standard_ratios = {
+        "1:1": 1.0,
+        "5:4": 1.25,
+        "4:3": 1.333,
+        "3:2": 1.5,
+        "16:10": 1.6,
+        "16:9": 1.778,
+        "2:1": 2.0,
+        # Pionowe proporcje
+        "4:5": 0.8,
+        "3:4": 0.75,
+        "2:3": 0.667,
+        "10:16": 0.625,
+        "9:16": 0.5625,
+        "1:2": 0.5
     }
     
-    return common_ratios.get((ratio_w, ratio_h), f"{ratio_w}:{ratio_h}")
+    # Znajdź najbliższą proporcję
+    closest_ratio = min(standard_ratios.items(), 
+                       key=lambda x: abs(x[1] - actual_ratio))
+    
+    return closest_ratio[0]
 
 def extract_color_palette(image_bytes, num_colors=6):
     """Wyciąga paletę kolorów z obrazu"""
@@ -94,6 +191,7 @@ def extract_color_palette(image_bytes, num_colors=6):
         palette = color_thief.get_palette(color_count=num_colors)
         
         # Usuń plik tymczasowy
+        import os
         os.unlink(tmp_file_path)
         
         # Konwertuj na hex
@@ -103,8 +201,8 @@ def extract_color_palette(image_bytes, num_colors=6):
         st.warning(f"Nie udało się wyciągnąć palety kolorów: {e}")
         return []
 
-def process_uploaded_image(uploaded_file):
-    """Przetwarza przesłany obraz i wyciąga metadane"""
+def process_uploaded_image(service, uploaded_file, images_folder_id):
+    """Przetwarza przesłany obraz i zapisuje na Drive"""
     # Generuj unikalny hash
     file_bytes = uploaded_file.getvalue()
     file_hash = hashlib.md5(file_bytes).hexdigest()
@@ -112,13 +210,15 @@ def process_uploaded_image(uploaded_file):
     # Otwórz obraz
     image = Image.open(io.BytesIO(file_bytes))
     
-    # Zapisz obraz na dysku
+    # Przygotuj nazwę pliku
     file_extension = uploaded_file.name.split('.')[-1].lower()
     filename = f"{file_hash}.{file_extension}"
-    filepath = f"data/uploads/{filename}"
     
-    with open(filepath, "wb") as f:
-        f.write(file_bytes)
+    # Upload na Google Drive
+    drive_file_id = upload_file_to_drive(service, file_bytes, filename, images_folder_id)
+    
+    if not drive_file_id:
+        return None
     
     # Wyciągnij metadane
     width, height = image.size
@@ -128,6 +228,7 @@ def process_uploaded_image(uploaded_file):
     return {
         "id": file_hash,
         "filename": uploaded_file.name,
+        "drive_file_id": drive_file_id,
         "stored_filename": filename,
         "upload_date": datetime.now().isoformat(),
         "technical": {
@@ -139,9 +240,25 @@ def process_uploaded_image(uploaded_file):
         }
     }
 
+@st.cache_data(ttl=300)  # Cache na 5 minut
+def get_image_from_drive(service, file_id):
+    """Pobiera obraz z Google Drive z cache"""
+    return download_file_from_drive(service, file_id)
+
 # Strona 1: Uploader
 def uploader_page():
     st.title("Dodaj Nową Grafikę")
+    
+    # Połącz z Drive
+    service = connect_to_drive()
+    if not service:
+        st.error("Brak połączenia z Google Drive!")
+        return
+    
+    main_folder_id = get_folder_id()
+    if not main_folder_id:
+        st.error("Brak ID folderu głównego w konfiguracji!")
+        return
     
     col1, col2 = st.columns([1, 1])
     
@@ -177,37 +294,47 @@ def uploader_page():
     if st.button("Dodaj grafikę", type="primary"):
         if uploaded_file and typ_odbiorcy and typ_kampanii:
             try:
-                # Przetwórz obraz
-                image_data = process_uploaded_image(uploaded_file)
-                
-                # Dodaj dane biznesowe
-                image_data["business"] = {
-                    "rynek": rynek,
-                    "typ_odbiorcy": typ_odbiorcy,
-                    "typ_kampanii": typ_kampanii,
-                    "ctr": ctr,
-                    "roas": roas
-                }
-                
-                # Wczytaj istniejące dane
-                data = load_data()
-                
-                # Sprawdź duplikaty
-                existing_ids = [item["id"] for item in data["graphics"]]
-                if image_data["id"] in existing_ids:
-                    st.warning("Ta grafika już istnieje w bazie!")
-                    return
-                
-                # Dodaj nową grafikę
-                data["graphics"].append(image_data)
-                
-                # Zapisz dane
-                if save_data(data):
-                    st.success("Grafika została dodana!")
-                    st.balloons()
-                else:
-                    st.error("Wystąpił błąd podczas zapisu.")
+                with st.spinner("Przetwarzanie i upload na Google Drive..."):
+                    # Znajdź lub utwórz folder images
+                    images_folder_id = find_or_create_folder(service, main_folder_id, "images")
                     
+                    # Przetwórz obraz
+                    image_data = process_uploaded_image(service, uploaded_file, images_folder_id)
+                    
+                    if not image_data:
+                        st.error("Błąd podczas uploadu obrazu na Google Drive!")
+                        return
+                    
+                    # Dodaj dane biznesowe
+                    image_data["business"] = {
+                        "rynek": rynek,
+                        "typ_odbiorcy": typ_odbiorcy,
+                        "typ_kampanii": typ_kampanii,
+                        "ctr": ctr,
+                        "roas": roas
+                    }
+                    
+                    # Wczytaj istniejące dane
+                    data = load_json_from_drive(service, main_folder_id)
+                    
+                    # Sprawdź duplikaty
+                    existing_ids = [item["id"] for item in data["graphics"]]
+                    if image_data["id"] in existing_ids:
+                        st.warning("Ta grafika już istnieje w bazie!")
+                        return
+                    
+                    # Dodaj nową grafikę
+                    data["graphics"].append(image_data)
+                    
+                    # Zapisz dane
+                    if save_json_to_drive(service, data, main_folder_id):
+                        st.success("Grafika została dodana na Google Drive!")
+                        st.balloons()
+                        # Wyczyść cache
+                        st.cache_data.clear()
+                    else:
+                        st.error("Wystąpił błąd podczas zapisu.")
+                        
             except Exception as e:
                 st.error(f"Błąd podczas przetwarzania: {e}")
         else:
@@ -217,9 +344,21 @@ def uploader_page():
 def report_page():
     st.title("Raport Grafik")
     
+    # Połącz z Drive
+    service = connect_to_drive()
+    if not service:
+        st.error("Brak połączenia z Google Drive!")
+        return
+    
+    main_folder_id = get_folder_id()
+    if not main_folder_id:
+        st.error("Brak ID folderu głównego w konfiguracji!")
+        return
+    
     # Wczytaj dane
-    data = load_data()
-    graphics = data["graphics"]
+    with st.spinner("Ładowanie danych z Google Drive..."):
+        data = load_json_from_drive(service, main_folder_id)
+        graphics = data["graphics"]
     
     if not graphics:
         st.info("Brak grafik w bazie. Dodaj pierwszą grafikę w zakładce 'Uploader'.")
@@ -300,13 +439,19 @@ def report_page():
             cols = st.columns([1, 2, 2, 1, 1, 1.5, 1, 2])
             
             with cols[0]:
-                # Miniaturka
-                image_path = f"data/uploads/{graphic['stored_filename']}"
-                if os.path.exists(image_path):
-                    st.image(image_path, width=60)
-                    # Przycisk do powiększenia
-                    if st.button("🔍", key=f"enlarge_{graphic['id']}", help="Powiększ grafikę"):
-                        st.image(image_path, caption=graphic['filename'])
+                # Miniaturka z Google Drive
+                if graphic.get("drive_file_id"):
+                    try:
+                        image_data = get_image_from_drive(service, graphic["drive_file_id"])
+                        if image_data:
+                            st.image(image_data, width=60)
+                            # Przycisk do powiększenia
+                            if st.button("🔍", key=f"enlarge_{graphic['id']}", help="Powiększ grafikę"):
+                                st.image(image_data, caption=graphic['filename'])
+                        else:
+                            st.write("❌")
+                    except:
+                        st.write("❌")
                 else:
                     st.write("❌")
             
@@ -346,20 +491,19 @@ def report_page():
 
 # Główna aplikacja
 def main():
-    create_directories()
-    
     # Sidebar z nawigacją
     st.sidebar.title("Katalog Grafik")
     page = st.sidebar.selectbox("Wybierz stronę", ["Uploader", "Raport"])
     
-    # Informacje o backupach
-    backup_files = [f for f in os.listdir("backups") if f.startswith("graphics_data_")]
-    if backup_files:
-        st.sidebar.write(f"Dostępne backupy: {len(backup_files)}")
-        if st.sidebar.button("Pokaż backupy"):
-            st.sidebar.write("Ostatnie backupy:")
-            for backup in sorted(backup_files)[-5:]:
-                st.sidebar.text(backup)
+    # Status połączenia
+    service = connect_to_drive()
+    if service:
+        st.sidebar.success("✅ Połączono z Google Drive")
+        folder_id = get_folder_id()
+        if folder_id:
+            st.sidebar.info(f"📁 Folder: {folder_id[:8]}...")
+    else:
+        st.sidebar.error("❌ Brak połączenia z Google Drive")
     
     # Wybór strony
     if page == "Uploader":
