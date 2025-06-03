@@ -477,12 +477,9 @@ def report_page():
                             image_data = get_image_from_drive(service, graphic["drive_file_id"])
                         
                         if image_data:
-                            # Konwertuj bytes na obraz PIL dla pewności
+                            # Konwertuj bytes na obraz PIL i wyświetl jako większą miniaturkę
                             image = Image.open(io.BytesIO(image_data))
-                            st.image(image, width=60)
-                            # Przycisk do powiększenia
-                            if st.button("🔍", key=f"enlarge_{graphic['id']}", help="Powiększ grafikę"):
-                                st.image(image, caption=graphic['filename'])
+                            st.image(image, width=120)  # Większa miniaturka, natywne powiększanie
                         else:
                             st.write("❌ Brak danych")
                             st.caption("Nie udało się pobrać")
