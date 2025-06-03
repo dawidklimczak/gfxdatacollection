@@ -40,6 +40,12 @@ def connect_to_drive():
 
 def get_folder_id():
     """Pobiera ID głównego folderu z secrets"""
+    # Sprawdź w google_service_account sekcji
+    if "google_service_account" in st.secrets:
+        if "drive_folder_id" in st.secrets["google_service_account"]:
+            return st.secrets["google_service_account"]["drive_folder_id"]
+    
+    # Sprawdź w głównym poziomie (fallback)
     return st.secrets.get("drive_folder_id", "")
 
 def find_or_create_folder(service, parent_folder_id, folder_name):
