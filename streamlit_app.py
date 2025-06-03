@@ -48,7 +48,33 @@ def get_folder_id():
     # Sprawdź w głównym poziomie (fallback)
     return st.secrets.get("drive_folder_id", "")
 
+def test_drive_access(service, folder_id):
+    """Testuje dostęp do folderu Google Drive"""
+    try:
+        # Spróbuj pobrać metadane folderu
+        folder = service.files().get(fileId=folder_id).execute()
+        return True, f"✅ Dostęp OK. Folder: {folder.get('name', 'Bez nazwy')}"
+    except Exception as e:
+        return False, f"❌ Błąd dostępu: {str(e)}"
+
 def find_or_create_folder(service, parent_folder_id, folder_name):
+    """Znajduje lub tworzy folder o podanej nazwie"""
+    # Szukaj istniejącego folderu
+    query = f"name='{folder_name}' and '{parent_folder_id}' in parents and mimeType='application/vnd.google-apps.folder'"
+    results = service.files().list(q=query).execute()
+    items = results.get('files', [])
+    
+    if items:
+        return items[0]['id']
+    
+    # Utwórz nowy folder
+    folder_metadata = {
+        'name': folder_name,
+        'parents': [parent_folder_id],
+        'mimeType': 'application/vnd.google-apps.folder'
+    }
+    folder = service.files().create(body=folder_metadata).execute()
+    return folder['id']
     """Znajduje lub tworzy folder o podanej nazwie"""
     # Szukaj istniejącego folderu
     query = f"name='{folder_name}' and '{parent_folder_id}' in parents and mimeType='application/vnd.google-apps.folder'"
@@ -246,9 +272,8 @@ def process_uploaded_image(service, uploaded_file, images_folder_id):
         }
     }
 
-@st.cache_data(ttl=300)  # Cache na 5 minut
 def get_image_from_drive(service, file_id):
-    """Pobiera obraz z Google Drive z cache"""
+    """Pobiera obraz z Google Drive"""
     return download_file_from_drive(service, file_id)
 
 # Strona 1: Uploader
@@ -448,18 +473,25 @@ def report_page():
                 # Miniaturka z Google Drive
                 if graphic.get("drive_file_id"):
                     try:
-                        image_data = get_image_from_drive(service, graphic["drive_file_id"])
+                        with st.spinner("Ładowanie..."):
+                            image_data = get_image_from_drive(service, graphic["drive_file_id"])
+                        
                         if image_data:
-                            st.image(image_data, width=60)
+                            # Konwertuj bytes na obraz PIL dla pewności
+                            image = Image.open(io.BytesIO(image_data))
+                            st.image(image, width=60)
                             # Przycisk do powiększenia
                             if st.button("🔍", key=f"enlarge_{graphic['id']}", help="Powiększ grafikę"):
-                                st.image(image_data, caption=graphic['filename'])
+                                st.image(image, caption=graphic['filename'])
                         else:
-                            st.write("❌")
-                    except:
-                        st.write("❌")
+                            st.write("❌ Brak danych")
+                            st.caption("Nie udało się pobrać")
+                    except Exception as e:
+                        st.write("❌ Błąd")
+                        st.caption(f"Error: {str(e)[:30]}...")
                 else:
-                    st.write("❌")
+                    st.write("❌ Brak ID")
+                    st.caption("Brak drive_file_id")
             
             with cols[1]:
                 st.write(graphic['business']['typ_odbiorcy'])
@@ -508,6 +540,18 @@ def main():
         folder_id = get_folder_id()
         if folder_id:
             st.sidebar.info(f"📁 Folder: {folder_id[:8]}...")
+            
+            # Test dostępu do folderu
+            access_ok, access_msg = test_drive_access(service, folder_id)
+            if access_ok:
+                st.sidebar.success(access_msg)
+            else:
+                st.sidebar.error(access_msg)
+                st.sidebar.write("**Sprawdź:**")
+                st.sidebar.write("1. Czy folder istnieje?")
+                st.sidebar.write("2. Czy udostępniłeś go dla:")
+                st.sidebar.code("robot-267@gfxdatacollection.iam.gserviceaccount.com")
+                st.sidebar.write("3. Czy ma uprawnienia 'Editor'?")
     else:
         st.sidebar.error("❌ Brak połączenia z Google Drive")
     
