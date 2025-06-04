@@ -639,10 +639,10 @@ def main():
         st.sidebar.error("❌ Brak połączenia z Google Drive")
     
     # Wybór strony
-    if page == "Uploader":
-        uploader_page()
-    elif page == "Raport":
+    if page == "Raport":
         report_page()
+    elif page == "Uploader":
+        uploader_page()
 
 if __name__ == "__main__":
     main()
