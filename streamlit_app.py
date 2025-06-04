@@ -14,7 +14,9 @@ import base64
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+from googleapiclient.errors import HttpError
 import requests
+import time
 
 # Konfiguracja aplikacji
 st.set_page_config(
@@ -23,9 +25,66 @@ st.set_page_config(
     layout="wide"
 )
 
-# Połączenie z Google Drive
+def retry_api_call(func, max_retries=3, delay=1):
+    """Retry mechanism dla Google API calls"""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            error_str = str(e).lower()
+            if attempt == max_retries - 1:
+                # Ostatnia próba - rzuć błąd
+                raise e
+            
+            # Retry dla typowych błędów sieciowych
+            if any(keyword in error_str for keyword in ['ssl', 'timeout', 'connection', 'network']):
+                st.warning(f"Próba {attempt + 1}/{max_retries} nie powiodła się. Ponawiam...")
+                time.sleep(delay * (attempt + 1))  # Exponential backoff
+                continue
+            else:
+                # Dla innych błędów nie retry
+                raise e
+
+# Połączenie z Google Drive (bez cache dla uploadera)
+# Połączenie z Google Drive (z cache dla raportu)
 @st.cache_resource
 def connect_to_drive():
+    """Łączy się z Google Drive API z cache"""
+    try:
+        credentials = service_account.Credentials.from_service_account_info(
+            st.secrets["google_service_account"],
+            scopes=['https://www.googleapis.com/auth/drive']
+        )
+        service = build('drive', 'v3', credentials=credentials)
+        return service
+    except Exception as e:
+        st.error(f"Błąd połączenia z Google Drive: {e}")
+        return None
+
+# Połączenie z Google Drive (bez cache dla uploadera)
+def connect_to_drive_uploader():
+    """Łączy się z Google Drive API bez cache (dla uploadera)"""
+    try:
+        credentials = service_account.Credentials.from_service_account_info(
+            st.secrets["google_service_account"],
+            scopes=['https://www.googleapis.com/auth/drive']
+        )
+        service = build('drive', 'v3', credentials=credentials)
+        return service
+    except Exception as e:
+        st.error(f"Błąd połączenia z Google Drive: {e}")
+        return None
+    """Łączy się z Google Drive API bez cache (dla uploadera)"""
+    try:
+        credentials = service_account.Credentials.from_service_account_info(
+            st.secrets["google_service_account"],
+            scopes=['https://www.googleapis.com/auth/drive']
+        )
+        service = build('drive', 'v3', credentials=credentials)
+        return service
+    except Exception as e:
+        st.error(f"Błąd połączenia z Google Drive: {e}")
+        return None
     """Łączy się z Google Drive API"""
     try:
         credentials = service_account.Credentials.from_service_account_info(
@@ -280,8 +339,8 @@ def get_image_from_drive(service, file_id):
 def uploader_page():
     st.title("Dodaj Nową Grafikę")
     
-    # Połącz z Drive
-    service = connect_to_drive()
+    # Połącz z Drive (bez cache dla uploadera)
+    service = connect_to_drive_uploader()
     if not service:
         st.error("Brak połączenia z Google Drive!")
         return
@@ -326,11 +385,15 @@ def uploader_page():
         if uploaded_file and typ_odbiorcy and typ_kampanii:
             try:
                 with st.spinner("Przetwarzanie i upload na Google Drive..."):
-                    # Znajdź lub utwórz folder images
-                    images_folder_id = find_or_create_folder(service, main_folder_id, "images")
+                    # Znajdź lub utwórz folder images z retry
+                    images_folder_id = retry_api_call(
+                        lambda: find_or_create_folder(service, main_folder_id, "images")
+                    )
                     
-                    # Przetwórz obraz
-                    image_data = process_uploaded_image(service, uploaded_file, images_folder_id)
+                    # Przetwórz obraz z retry
+                    image_data = retry_api_call(
+                        lambda: process_uploaded_image(service, uploaded_file, images_folder_id)
+                    )
                     
                     if not image_data:
                         st.error("Błąd podczas uploadu obrazu na Google Drive!")
@@ -345,8 +408,10 @@ def uploader_page():
                         "roas": roas
                     }
                     
-                    # Wczytaj istniejące dane
-                    data = load_json_from_drive(service, main_folder_id)
+                    # Wczytaj istniejące dane z retry
+                    data = retry_api_call(
+                        lambda: load_json_from_drive(service, main_folder_id)
+                    )
                     
                     # Sprawdź duplikaty
                     existing_ids = [item["id"] for item in data["graphics"]]
@@ -357,8 +422,10 @@ def uploader_page():
                     # Dodaj nową grafikę
                     data["graphics"].append(image_data)
                     
-                    # Zapisz dane
-                    if save_json_to_drive(service, data, main_folder_id):
+                    # Zapisz dane z retry
+                    success = retry_api_call(
+                        lambda: save_json_to_drive(service, data, main_folder_id)
+                    )
                         st.success("Grafika została dodana na Google Drive!")
                         st.balloons()
                         # Wyczyść cache
@@ -414,7 +481,7 @@ def report_page():
     # Sortowanie
     sort_col1, sort_col2 = st.columns(2)
     with sort_col1:
-        sort_by = st.selectbox("Sortuj według", ["upload_date", "ctr", "roas", "filename"])
+        sort_by = st.selectbox("Sortuj według", ["upload_date", "ctr", "roas", "filename", "numer_akcji"])
     with sort_col2:
         sort_order = st.selectbox("Kolejność", ["Malejąco", "Rosnąco"])
     
@@ -432,6 +499,8 @@ def report_page():
         filtered_graphics.sort(key=lambda x: x["business"][sort_by], reverse=reverse)
     elif sort_by == "upload_date":
         filtered_graphics.sort(key=lambda x: x["upload_date"], reverse=reverse)
+    elif sort_by == "numer_akcji":
+        filtered_graphics.sort(key=lambda x: x["business"].get("numer_akcji", ""), reverse=reverse)
     else:
         filtered_graphics.sort(key=lambda x: x["filename"], reverse=reverse)
     
@@ -546,10 +615,14 @@ def main():
     else:
         st.sidebar.info("🔒 Uploader wymaga hasła")
     
-    page = st.sidebar.radio("Wybierz stronę", ["Uploader", "Raport"])
+    page = st.sidebar.radio("Wybierz stronę", ["Raport", "Uploader"], index=0)
     
-    # Status połączenia
-    service = connect_to_drive()
+    # Status połączenia - różne dla uploadera i raportu
+    if page == "Uploader":
+        service = connect_to_drive_uploader()  # Bez cache
+    else:
+        service = connect_to_drive()  # Z cache
+        
     if service:
         st.sidebar.success("✅ Połączono z Google Drive")
         folder_id = get_folder_id()
@@ -562,11 +635,6 @@ def main():
                 st.sidebar.success(access_msg)
             else:
                 st.sidebar.error(access_msg)
-                st.sidebar.write("**Sprawdź:**")
-                st.sidebar.write("1. Czy folder istnieje?")
-                st.sidebar.write("2. Czy udostępniłeś go dla:")
-                st.sidebar.code("robot-267@gfxdatacollection.iam.gserviceaccount.com")
-                st.sidebar.write("3. Czy ma uprawnienia 'Editor'?")
     else:
         st.sidebar.error("❌ Brak połączenia z Google Drive")
     
