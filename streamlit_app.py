@@ -453,21 +453,22 @@ def report_page():
         st.subheader("Grafiki")
         
         # Nagłówki tabeli
-        header_cols = st.columns([1, 2, 2, 1, 1, 1.5, 1, 2])
+        header_cols = st.columns([1, 1.5, 2, 2, 1, 1, 1.5, 1, 2])
         header_cols[0].write("**Grafika**")
-        header_cols[1].write("**Typ odbiorcy**")
-        header_cols[2].write("**Typ kampanii**")
-        header_cols[3].write("**CTR**")
-        header_cols[4].write("**ROAS**")
-        header_cols[5].write("**Wymiary**")
-        header_cols[6].write("**Proporcje**")
-        header_cols[7].write("**Paleta kolorów**")
+        header_cols[1].write("**Numer akcji**")
+        header_cols[2].write("**Typ odbiorcy**")
+        header_cols[3].write("**Typ kampanii**")
+        header_cols[4].write("**CTR**")
+        header_cols[5].write("**ROAS**")
+        header_cols[6].write("**Wymiary**")
+        header_cols[7].write("**Proporcje**")
+        header_cols[8].write("**Paleta kolorów**")
         
         st.divider()
         
         # Wiersze tabeli
         for idx, graphic in enumerate(filtered_graphics):
-            cols = st.columns([1, 2, 2, 1, 1, 1.5, 1, 2])
+            cols = st.columns([1, 1.5, 2, 2, 1, 1, 1.5, 1, 2])
             
             with cols[0]:
                 # Miniaturka z Google Drive
@@ -492,25 +493,30 @@ def report_page():
                     st.caption("Brak drive_file_id")
             
             with cols[1]:
-                st.write(graphic['business']['typ_odbiorcy'])
+                # Numer akcji (może nie istnieć w starszych zapisach)
+                numer_akcji = graphic['business'].get('numer_akcji', 'Brak')
+                st.write(numer_akcji)
             
             with cols[2]:
-                st.write(graphic['business']['typ_kampanii'])
+                st.write(graphic['business']['typ_odbiorcy'])
             
             with cols[3]:
-                st.write(f"{graphic['business']['ctr']:.2f}%")
+                st.write(graphic['business']['typ_kampanii'])
             
             with cols[4]:
-                st.write(f"{graphic['business']['roas']:.2f}")
+                st.write(f"{graphic['business']['ctr']:.2f}%")
             
             with cols[5]:
+                st.write(f"{graphic['business']['roas']:.2f}")
+            
+            with cols[6]:
                 tech = graphic['technical']
                 st.write(f"{tech['dimensions'][0]}×{tech['dimensions'][1]}")
             
-            with cols[6]:
+            with cols[7]:
                 st.write(tech['ratio'])
             
-            with cols[7]:
+            with cols[8]:
                 # Paleta kolorów jako małe kwadraciki
                 if tech['color_palette']:
                     colors_html = "".join([
@@ -527,8 +533,19 @@ def report_page():
 
 # Główna aplikacja
 def main():
+    # Inicjalizacja session state
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+    
     # Sidebar z nawigacją
     st.sidebar.title("Katalog Grafik")
+    
+    # Status uwierzytelnienia
+    if st.session_state.get("authenticated", False):
+        st.sidebar.success("🔓 Zalogowano do uploadera")
+    else:
+        st.sidebar.info("🔒 Uploader wymaga hasła")
+    
     page = st.sidebar.radio("Wybierz stronę", ["Uploader", "Raport"])
     
     # Status połączenia
